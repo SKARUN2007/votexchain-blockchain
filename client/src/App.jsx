@@ -7,6 +7,7 @@ import Home from './pages/Home';
 import Auth from './pages/Auth';
 import Voting from './pages/Voting';
 import Admin from './pages/Admin';
+import Verify from './pages/Verify';
 import HowItWorks from './pages/HowItWorks';
 import ParticleBackground from './components/ParticleBackground';
 import './App.css';
@@ -23,6 +24,7 @@ const Navigation = ({ user, handleLogout, theme, toggleTheme }) => (
     </Link>
     <div className="nav-links">
       <Link to="/how-it-works" style={{ fontSize: '0.85rem' }}>How It Works</Link>
+      <Link to="/verify" style={{ fontSize: '0.85rem' }}>Verify Run</Link>
       {user ? (
         <>
           <Link to="/voting">Vote</Link>
@@ -84,6 +86,7 @@ function App() {
                 <Route path="/how-it-works" element={<HowItWorks />} />
                 <Route path="/auth" element={<Auth setUser={setUser} />} />
                 <Route path="/voting" element={<Voting user={user} />} />
+                <Route path="/verify" element={<Verify />} />
                 <Route path="/admin" element={<Admin />} />
               </Routes>
             </AnimatePresence>

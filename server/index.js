@@ -35,6 +35,9 @@ let electionState = {
 // Archives for past elections
 let electionHistory = [];
 
+// Multi-Sig Pending Reset State
+let pendingReset = { proposedBy: null, signatures: [] };
+
 // --- Database Connection & Setup ---
 mongoose.connect(MONGO_URI)
   .then(() => {
@@ -67,7 +70,7 @@ function initializeBlockchainInMem() {
 // Rate Limiting
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10, // Limit each IP to 10 requests per `window`
+  max: 1000, // Increased for local testing
   message: { error: 'Too many authentication attempts, please try again later.' }
 });
 
@@ -151,39 +154,62 @@ app.get('/api/election/history', (req, res) => {
   res.json(electionHistory);
 });
 
-// Admin Reset
-app.post('/api/reset', async (req, res) => {
-  try {
-    // Save current state to history
-    let currentBlocks;
-    let currentVotes;
-    if (mongoose.connection.readyState === 1) {
-      currentBlocks = await Block.find().sort({ index: 1 });
-      currentVotes = await Vote.find();
-      
-      await Block.deleteMany({});
-      await Vote.deleteMany({});
-      
-      const genesisBlock = new BlockClass(0, new Date().toISOString(), "Genesis Block", "0");
-      await new Block(genesisBlock).save();
-    } else {
-      currentBlocks = [...memoryDB.blocks];
-      currentVotes = [...memoryDB.votes];
-      
-      memoryDB.votes = [];
-      memoryDB.blocks = [];
-      const genesisBlock = new BlockClass(0, new Date().toISOString(), "Genesis Block", "0");
-      memoryDB.blocks.push(genesisBlock);
-    }
-    
-    electionHistory.push({
-      date: new Date().toISOString(),
-      blocks: currentBlocks,
-      votes: currentVotes
-    });
+// Admin Reset Status
+app.get('/api/reset-status', (req, res) => {
+  res.json({ pendingReset });
+});
 
-    addAuditLog(`ELECTION_RESET`, `Blockchain has been reset and archived`);
-    res.json({ message: "Blockchain reset and previous election archived successfully." });
+// Admin Reset
+app.post('/api/reset', authenticateToken, async (req, res) => {
+  try {
+    const adminId = req.user.voterId; 
+    
+    if (!pendingReset.proposedBy) {
+      pendingReset.proposedBy = adminId;
+      pendingReset.signatures.push(adminId);
+      addAuditLog(`RESET_PROPOSED`, `Admin ${adminId} proposed a blockchain reset`);
+      return res.json({ message: "Reset proposed. Requires 1 more signature.", pendingReset });
+    }
+
+    if (!pendingReset.signatures.includes(adminId)) {
+      pendingReset.signatures.push(adminId);
+    }
+
+    if (pendingReset.signatures.length >= 2) {
+      // Execute reset
+      let currentBlocks;
+      let currentVotes;
+      if (mongoose.connection.readyState === 1) {
+        currentBlocks = await Block.find().sort({ index: 1 });
+        currentVotes = await Vote.find();
+        
+        await Block.deleteMany({});
+        await Vote.deleteMany({});
+        
+        const genesisBlock = new BlockClass(0, new Date().toISOString(), "Genesis Block", "0");
+        await new Block(genesisBlock).save();
+      } else {
+        currentBlocks = [...memoryDB.blocks];
+        currentVotes = [...memoryDB.votes];
+        
+        memoryDB.votes = [];
+        memoryDB.blocks = [];
+        const genesisBlock = new BlockClass(0, new Date().toISOString(), "Genesis Block", "0");
+        memoryDB.blocks.push(genesisBlock);
+      }
+      
+      electionHistory.push({
+        date: new Date().toISOString(),
+        blocks: currentBlocks,
+        votes: currentVotes
+      });
+
+      pendingReset = { proposedBy: null, signatures: [] }; // Reset the multi-sig state
+      addAuditLog(`ELECTION_RESET`, `Blockchain reset executed via Multi-Sig consensus`);
+      return res.json({ message: "Blockchain reset and previous election archived successfully." });
+    } else {
+      return res.json({ message: `Signature added. Total signatures: ${pendingReset.signatures.length}/2`, pendingReset });
+    }
   } catch (error) {
     res.status(500).json({ error: "Failed to reset blockchain" });
   }
@@ -282,6 +308,10 @@ app.post('/api/vote', authenticateToken, isElectionActive, async (req, res) => {
       lastBlock.hash
     );
 
+    // Mine block with difficulty defined by Blockchain
+    const bc = new Blockchain();
+    newBlockData.mineBlock(bc.difficulty);
+
     if (mongoose.connection.readyState === 1) {
       await new Block(newBlockData).save();
     } else {
@@ -313,6 +343,11 @@ app.get('/api/blockchain', async (req, res) => {
 });
 
 app.get('/api/results', async (req, res) => {
+  // Smart Contract Time-Lock Simulation
+  if (electionState.isActive && electionState.endTime && new Date() < new Date(electionState.endTime)) {
+    return res.status(403).json({ error: 'Contract Locked: Results hidden until election ends' });
+  }
+
   if (mongoose.connection.readyState === 1) {
     const results = await Vote.aggregate([
       { $group: { _id: '$candidate', count: { $sum: 1 } } }
@@ -341,6 +376,35 @@ app.get('/api/verify', async (req, res) => {
   const result = bc.isChainValid();
   addAuditLog(`CHAIN_AUDITED`, `Result: ${result.valid ? 'Valid' : 'Tampering Detected'}`);
   res.json(result);
+});
+
+app.get('/api/verify-receipt/:hash', async (req, res) => {
+  try {
+    const { hash } = req.params;
+    let chain;
+    if (mongoose.connection.readyState === 1) {
+      chain = await Block.find().sort({ index: 1 });
+    } else {
+      chain = memoryDB.blocks;
+    }
+    
+    // Find the block computationally (simulating block explorer search)
+    const block = chain.find(b => b.hash === hash);
+    
+    if (!block) {
+      return res.status(404).json({ valid: false, message: 'Transaction hash not found on the blockchain.' });
+    }
+    
+    // Return proof of existence without exposing voterId/candidate
+    return res.json({
+      valid: true,
+      blockIndex: block.index,
+      timestamp: block.timestamp,
+      previousHash: block.previousHash
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Receipt verification failed' });
+  }
 });
 
 app.post('/api/tamper', authenticateToken, async (req, res) => {

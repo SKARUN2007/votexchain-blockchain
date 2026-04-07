@@ -6,6 +6,7 @@ class Block {
     this.timestamp = timestamp;
     this.data = data; // UserID, Candidate, VoteID
     this.previousHash = previousHash;
+    this.nonce = 0;
     this.hash = this.calculateHash();
   }
 
@@ -14,14 +15,24 @@ class Block {
       this.index +
       this.previousHash +
       this.timestamp +
-      JSON.stringify(this.data)
+      JSON.stringify(this.data) +
+      this.nonce
     ).toString();
+  }
+
+  mineBlock(difficulty) {
+    while (this.hash.substring(0, difficulty) !== Array(difficulty + 1).join("0")) {
+      this.nonce++;
+      this.hash = this.calculateHash();
+    }
+    console.log(`Block Mined: ${this.hash}`);
   }
 }
 
 class Blockchain {
   constructor() {
     this.chain = [this.createGenesisBlock()];
+    this.difficulty = 3; // Target: hash must start with 3 zeros
   }
 
   createGenesisBlock() {
@@ -45,6 +56,11 @@ class Blockchain {
 
       // Check current hash
       if (currentBlock.hash !== currentBlock.calculateHash()) {
+        return { valid: false, tamperedBlock: currentBlock.index };
+      }
+
+      // Check if hash meets difficulty criteria
+      if (currentBlock.hash.substring(0, this.difficulty) !== Array(this.difficulty + 1).join("0")) {
         return { valid: false, tamperedBlock: currentBlock.index };
       }
 

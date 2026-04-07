@@ -3,10 +3,11 @@ import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   ShieldCheck, ShieldAlert, Database, Search, BarChart3, Clock, Hash, 
-  AlertTriangle, RefreshCw, Download, RotateCcw, Activity, Eye, X 
+  AlertTriangle, RefreshCw, Download, RotateCcw, Activity, Eye, X, Lock
 } from 'lucide-react';
 import { useToast } from '../context/ToastContext';
 import MerkleTree from '../components/MerkleTree';
+import html2canvas from 'html2canvas';
 
 const Admin = () => {
   const [chain, setChain] = useState([]);
@@ -17,28 +18,44 @@ const Admin = () => {
   const [verification, setVerification] = useState(null);
   const [loading, setLoading] = useState(true);
   
+  const [electionState, setElectionState] = useState({ isActive: true, endTime: null });
+  const [pendingReset, setPendingReset] = useState({ proposedBy: null, signatures: [] });
+  const [resultsLocked, setResultsLocked] = useState(false);
+  
   // Modals
   const [selectedBlock, setSelectedBlock] = useState(null);
   const [tamperModal, setTamperModal] = useState({ isOpen: false, block: null });
 
   const { addToast } = useToast();
   const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5001';
+  
+  const user = JSON.parse(localStorage.getItem('user'));
 
   const fetchData = async () => {
     try {
       const headers = { Authorization: `Bearer ${localStorage.getItem('token')}` };
-      const [bcRes, resRes, logRes, statsRes, histRes] = await Promise.all([
+      const [bcRes, logRes, statsRes, histRes, elRes, rstatRes] = await Promise.all([
         axios.get(`${API_URL}/api/blockchain`, { headers }),
-        axios.get(`${API_URL}/api/results`, { headers }),
         axios.get(`${API_URL}/api/audit-log`, { headers }),
         axios.get(`${API_URL}/api/stats`, { headers }),
-        axios.get(`${API_URL}/api/election/history`, { headers })
+        axios.get(`${API_URL}/api/election/history`, { headers }),
+        axios.get(`${API_URL}/api/election`, { headers }),
+        axios.get(`${API_URL}/api/reset-status`, { headers })
       ]);
       setChain(bcRes.data);
-      setResults(bcRes.data.length > 0 ? resRes.data : []);
       setAuditLog(logRes.data.reverse());
       setStats(statsRes.data);
       setHistory(histRes.data);
+      setElectionState(elRes.data);
+      setPendingReset(rstatRes.data.pendingReset);
+
+      try {
+        const resRes = await axios.get(`${API_URL}/api/results`, { headers });
+        setResults(bcRes.data.length > 0 ? resRes.data : []);
+        setResultsLocked(false);
+      } catch (err) {
+        if(err.response?.status === 403) setResultsLocked(true);
+      }
     } catch (err) {
       console.error('Error fetching data:', err);
     } finally {
@@ -93,34 +110,44 @@ const Admin = () => {
   };
 
   const resetElection = async () => {
-    if (!window.confirm(`⚠️ DANGER: Reset Election?\n\nThis will archive the current blockchain and start a fresh election. Are you sure?`)) return;
+    const isProposing = !pendingReset.proposedBy;
+    if (!window.confirm(`⚠️ MULTI-SIG RESET\n\nResetting the blockchain requires 2 Admin signatures.\nAre you sure you want to ${isProposing ? 'propose' : 'sign'} a reset?`)) return;
     try {
-      await axios.post(`${API_URL}/api/reset`, {}, {
+      const { data } = await axios.post(`${API_URL}/api/reset`, {}, {
         headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
       });
       fetchData();
       setVerification(null);
-      addToast('Election reset. Previous chain archived.', 'success');
+      addToast(data.message, 'success');
     } catch (err) {
-      addToast('Failed to reset election', 'error');
+      addToast('Failed to process reset signature', 'error');
     }
   };
 
-  const exportJSON = () => {
-    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(chain, null, 2));
-    const downloadAnchorNode = document.createElement('a');
-    downloadAnchorNode.setAttribute("href", dataStr);
-    downloadAnchorNode.setAttribute("download", `votexchain_export_${Date.now()}.json`);
-    document.body.appendChild(downloadAnchorNode); // required for firefox
-    downloadAnchorNode.click();
-    downloadAnchorNode.remove();
-    addToast('Blockchain JSON exported', 'success');
+  const exportJPEG = async () => {
+    addToast('Generating JPEG... Please wait.', 'info');
+    try {
+      const element = document.querySelector('.admin-container');
+      const canvas = await html2canvas(element, {
+        backgroundColor: '#0a0f1e', // match our dark theme
+        scale: 2 // higher res
+      });
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
+      
+      const link = document.createElement('a');
+      link.download = `votexchain_dashboard_${Date.now()}.jpg`;
+      link.href = dataUrl;
+      link.click();
+      
+      addToast('Dashboard downloaded as JPEG!', 'success');
+    } catch (err) {
+      addToast('Failed to generate image', 'error');
+    }
   };
 
   const totalVotes = chain.length - 1; // Subtract genesis
 
   if (loading) {
-    // ... loading spinner code omitted for brevity but keeping original structure
     return (
       <div style={{ textAlign: 'center', marginTop: '8rem' }}>
         <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 2, ease: 'linear' }} style={{ display: 'inline-block', marginBottom: '1.5rem' }}>
@@ -135,13 +162,16 @@ const Admin = () => {
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }} className="admin-container">
       
       {/* Header Actions */}
-      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '1rem', marginBottom: '1rem' }}>
-        <button onClick={exportJSON} className="btn btn-outline" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.5rem 1rem', fontSize: '0.8rem' }}>
-          <Download size={14} /> Export JSON
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '1rem', marginBottom: '1rem' }} data-html2canvas-ignore>
+        <button onClick={exportJPEG} className="btn btn-outline" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.5rem 1rem', fontSize: '0.8rem' }}>
+          <Download size={14} /> Download Dashboard (JPEG)
         </button>
-        <button onClick={resetElection} className="btn btn-danger" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.5rem 1rem', fontSize: '0.8rem' }}>
-          <RotateCcw size={14} /> Reset Election
-        </button>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.25rem' }}>
+          <button onClick={resetElection} className="btn btn-danger" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.5rem 1rem', fontSize: '0.8rem' }}>
+            <RotateCcw size={14} /> {pendingReset?.proposedBy ? (pendingReset.signatures.length >= 2 ? 'Executing...' : `Approve Reset (${pendingReset.signatures.length}/2)`) : 'Propose Reset'}
+          </button>
+          {pendingReset?.proposedBy && <span style={{ fontSize: '0.7rem', color: 'var(--warning)', letterSpacing: '0.5px' }}>Requires 2nd Admin Signature</span>}
+        </div>
       </div>
 
       {/* Header */}
@@ -193,31 +223,39 @@ const Admin = () => {
              </div>
           </div>
 
-          <div>
-            {results.length > 0 ? results.map((r, i) => {
-              const percentage = totalVotes > 0 ? ((r.count / totalVotes) * 100).toFixed(1) : 0;
-              return (
-                <div key={r._id} style={{ marginBottom: '1.25rem' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem', alignItems: 'baseline' }}>
-                    <span style={{ fontWeight: 600, fontSize: '0.85rem' }}>{r._id.split(' ')[0]}</span>
-                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.75rem' }}>
-                      <span style={{ color: 'var(--primary)' }}>{r.count}</span> ({percentage}%)
-                    </span>
+          {resultsLocked ? (
+            <div style={{ textAlign: 'center', padding: '2rem 1rem', opacity: 0.8, background: 'rgba(251, 191, 36, 0.05)', borderRadius: '8px', border: '1px solid rgba(251, 191, 36, 0.2)' }}>
+               <Lock size={36} color="var(--warning)" style={{ marginBottom: '1rem' }} />
+               <h3 style={{ color: 'var(--warning)', fontSize: '1rem', marginBottom: '0.25rem' }}>Contract Locked</h3>
+               <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Results are cryptographically shielded until the election ends.</p>
+            </div>
+          ) : (
+            <div>
+              {results.length > 0 ? results.map((r, i) => {
+                const percentage = totalVotes > 0 ? ((r.count / totalVotes) * 100).toFixed(1) : 0;
+                return (
+                  <div key={r._id} style={{ marginBottom: '1.25rem' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem', alignItems: 'baseline' }}>
+                      <span style={{ fontWeight: 600, fontSize: '0.85rem' }}>{r._id.split(' ')[0]}</span>
+                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.75rem' }}>
+                        <span style={{ color: 'var(--primary)' }}>{r.count}</span> ({percentage}%)
+                      </span>
+                    </div>
+                    <div style={{ height: '6px', background: 'rgba(15, 23, 42, 0.6)', borderRadius: 'var(--radius-full)', overflow: 'hidden' }}>
+                      <motion.div 
+                        initial={{ width: 0 }}
+                        animate={{ width: `${percentage}%` }}
+                        transition={{ duration: 1.2, ease: "easeOut", delay: i * 0.15 }}
+                        style={{ height: '100%', background: `linear-gradient(90deg, var(--secondary), var(--primary))` }}
+                      />
+                    </div>
                   </div>
-                  <div style={{ height: '6px', background: 'rgba(15, 23, 42, 0.6)', borderRadius: 'var(--radius-full)', overflow: 'hidden' }}>
-                    <motion.div 
-                      initial={{ width: 0 }}
-                      animate={{ width: `${percentage}%` }}
-                      transition={{ duration: 1.2, ease: "easeOut", delay: i * 0.15 }}
-                      style={{ height: '100%', background: `linear-gradient(90deg, var(--secondary), var(--primary))` }}
-                    />
-                  </div>
-                </div>
-              );
-            }) : (
-              <p style={{ textAlign: 'center', opacity: 0.5, fontSize: '0.85rem' }}>No votes yet</p>
-            )}
-          </div>
+                );
+              }) : (
+                <p style={{ textAlign: 'center', opacity: 0.5, fontSize: '0.85rem' }}>No votes yet</p>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Cryptographic Audit Card */}
@@ -339,10 +377,10 @@ const Admin = () => {
                 </div>
 
                 {/* Hashes (Truncated) */}
-                <div className="hash-text">
-                  <span style={{ color: 'var(--secondary-light)', fontWeight: 600, fontSize: '0.55rem' }}>PREV </span>
-                  {block.previousHash.substring(0, 16)}...
-                </div>
+               <div className="hash-text">
+                 <span style={{ color: 'var(--secondary-light)', fontWeight: 600, fontSize: '0.55rem' }}>NONCE </span>
+                 <span style={{ color: 'var(--primary)', fontFamily: 'var(--font-mono)' }}>{block.nonce || 0}</span>
+               </div>
                 <div className="hash-text hash-active">
                   <span style={{ color: 'var(--primary)', fontWeight: 600, fontSize: '0.55rem' }}>HASH </span>
                   {block.hash.substring(0, 16)}...
@@ -381,8 +419,8 @@ const Admin = () => {
                </div>
 
                <div style={{ marginBottom: '1rem' }}>
-                 <p style={{fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.2rem'}}>Previous Hash</p>
-                 <p style={{ fontFamily: 'var(--font-mono)', fontSize: '0.85rem', wordBreak: 'break-all' }}>{selectedBlock.previousHash}</p>
+                 <p style={{fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.2rem'}}>PoW Nonce</p>
+                 <p style={{ fontFamily: 'var(--font-mono)', fontSize: '0.85rem' }}>{selectedBlock.nonce || 0}</p>
                </div>
 
                <div>
